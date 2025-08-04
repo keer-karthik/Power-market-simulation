@@ -169,7 +169,9 @@ class MonteCarloAnalyzer:
         time_hours = np.arange(n_hours) / 60.0  # Convert to hours
         base_renewables = {
             'solar': 200 * np.maximum(0, np.sin(np.pi * (time_hours - 6) / 12)),
-            'wind': 150 * (0.4 + 0.3 * np.sin(2 * np.pi * time_hours / 24))
+            'wind': 150 * (0.4 + 0.3 * np.sin(2 * np.pi * time_hours / 24)),
+            'hydro': 300 * (0.8 + 0.2 * np.sin(2 * np.pi * time_hours / 24)),  # Hydro with daily pattern
+            'nuclear': 800 * np.ones(n_hours) * 0.95  # Nuclear baseload at 95% capacity factor
         }
         
         # Generate scenarios

@@ -58,16 +58,43 @@ class RenewableGenerator:
     def generate_profile(self, time_hours: np.ndarray) -> np.ndarray:
         """Generate renewable output profile with uncertainty"""
         if self.type == 'solar':
-            # Solar follows daily pattern
+            # Solar follows daily pattern (peak at midday)
             base_profile = np.maximum(0, np.sin(np.pi * (time_hours - 6) / 12))
             uncertainty = np.random.normal(0, self.forecast_error_std, len(time_hours))
             profile = np.maximum(0, np.minimum(1.0, base_profile + uncertainty))
+            
         elif self.type == 'wind':
-            # Wind with more variability
+            # Wind with more variability (higher at night)
             base_profile = 0.4 + 0.3 * np.sin(2 * np.pi * time_hours / 24) 
             uncertainty = np.random.normal(0, 0.25, len(time_hours))
             profile = np.maximum(0, np.minimum(1.0, base_profile + uncertainty))
+            
+        elif self.type == 'hydro':
+            # Hydropower - dispatchable but weather dependent
+            # Base high availability with seasonal and weather variations
+            seasonal_factor = 0.8 + 0.2 * np.sin(2 * np.pi * (time_hours / 24 / 365) * 2)  # Seasonal variation
+            daily_pattern = 0.9 + 0.1 * np.sin(2 * np.pi * time_hours / 24)  # Slight daily pattern
+            base_profile = seasonal_factor * daily_pattern
+            # Lower uncertainty than wind/solar due to water reservoir buffering
+            uncertainty = np.random.normal(0, 0.05, len(time_hours))  # 5% uncertainty
+            profile = np.maximum(0.3, np.minimum(1.0, base_profile + uncertainty))  # Min 30% availability
+            
+        elif self.type == 'nuclear':
+            # Nuclear - baseload with very high capacity factor
+            # Occasional planned outages and very rare forced outages
+            base_profile = np.ones(len(time_hours)) * 0.95  # 95% capacity factor
+            # Very low uncertainty but occasional outages
+            outage_probability = 0.001  # 0.1% hourly outage probability
+            random_outages = np.random.random(len(time_hours)) < outage_probability
+            maintenance_pattern = np.sin(2 * np.pi * time_hours / (24 * 365)) < -0.99  # Annual maintenance
+            outages = random_outages | maintenance_pattern
+            profile = base_profile * (~outages)  # Zero output during outages
+            # Small uncertainty when operating
+            uncertainty = np.random.normal(0, 0.02, len(time_hours))  # 2% uncertainty
+            profile = np.maximum(0, np.minimum(1.0, profile + uncertainty * (~outages)))
+            
         else:
+            # Default renewable profile
             profile = np.ones(len(time_hours)) * 0.3  # Constant baseline
             
         return profile * self.capacity
@@ -478,6 +505,8 @@ def create_test_system() -> EnhancedPowerMarket:
     # Add renewable generation
     market.add_renewable(capacity=200, renewable_type='solar')
     market.add_renewable(capacity=150, renewable_type='wind')
+    market.add_renewable(capacity=300, renewable_type='hydro')  # Hydropower plant
+    market.add_renewable(capacity=800, renewable_type='nuclear')  # Nuclear baseload
     
     # Add battery storage
     market.add_battery_storage(capacity_mwh=100, power_mw=50, efficiency=0.9)

@@ -90,16 +90,39 @@ def run_basic_enhanced_simulation():
     print(f"Average price: ${np.mean(results['price']):.2f}/MWh")
     print(f"Price volatility: ${np.std(results['price']):.2f}/MWh")
     
-    # Generation mix summary
+    # Generation mix summary with renewable breakdown
     total_conventional = sum(np.sum(gen_data) for key, gen_data in results['generation'].items() 
                            if key.startswith('gen_'))
-    total_renewable = sum(np.sum(gen_data) for key, gen_data in results['generation'].items() 
-                        if key.startswith('ren_'))
+    
+    # Breakdown renewables by type
+    renewable_breakdown = {}
+    total_renewable = 0
+    for key, gen_data in results['generation'].items():
+        if key.startswith('ren_'):
+            gen_total = np.sum(gen_data)
+            total_renewable += gen_total
+            # Try to identify renewable type from market generator list
+            try:
+                ren_idx = int(key.split('_')[1])
+                if ren_idx < len(market.renewables):
+                    ren_type = market.renewables[ren_idx].type
+                    if ren_type not in renewable_breakdown:
+                        renewable_breakdown[ren_type] = 0
+                    renewable_breakdown[ren_type] += gen_total
+            except:
+                renewable_breakdown['other'] = renewable_breakdown.get('other', 0) + gen_total
+    
     total_generation = total_conventional + total_renewable
     
     print(f"\nGeneration Mix:")
     print(f"Conventional: {total_conventional:.0f} MWh ({total_conventional/total_generation*100:.1f}%)")
-    print(f"Renewable: {total_renewable:.0f} MWh ({total_renewable/total_generation*100:.1f}%)")
+    print(f"Renewable Total: {total_renewable:.0f} MWh ({total_renewable/total_generation*100:.1f}%)")
+    
+    # Show renewable breakdown
+    if renewable_breakdown:
+        print(f"  Renewable Breakdown:")
+        for ren_type, amount in renewable_breakdown.items():
+            print(f"    {ren_type.capitalize()}: {amount:.0f} MWh ({amount/total_generation*100:.1f}%)")
     
     # Storage operation summary
     if results['storage']:

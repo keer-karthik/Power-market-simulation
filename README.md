@@ -36,7 +36,11 @@ The current suite represents a significant evolution, transforming the original 
 **Key Enhancements**:
 - **Flexible Generator Count**: Expandable beyond original 6-generator limitation
 - **Energy Storage Integration**: Battery Energy Storage Systems (BESS) with charge/discharge dynamics
-- **Renewable Generation**: Solar and wind with stochastic profiles and curtailment
+- **Renewable Generation**: Solar, wind, hydropower, and nuclear with realistic operational profiles
+  - **Solar**: Diurnal patterns with weather uncertainty
+  - **Wind**: Variable output with higher nighttime generation
+  - **Hydropower**: Dispatchable generation with seasonal and reservoir constraints
+  - **Nuclear**: Baseload operation with high capacity factors and planned outages
 - **Demand Response**: Price-responsive load that can shift consumption patterns
 - **Advanced Stability Analysis**: Network-based stability assessment using graph theory
 - **Multiple Time Resolutions**: Configurable time steps from minutes to hours
@@ -112,8 +116,10 @@ for Modern Power System Analysis. https://github.com/[repository]
 ## Contributing
 
 This project welcomes contributions in the following areas:
-- Additional renewable energy models
-- New market mechanisms
+- Additional renewable energy models (geothermal, biomass, tidal, etc.)
+- Enhanced hydropower modeling (reservoir optimization, cascade systems)
+- Advanced nuclear operations (load following, small modular reactors)
+- New market mechanisms (capacity markets, carbon pricing)
 - Advanced optimization algorithms
 - Machine learning improvements
 - Documentation and examples
