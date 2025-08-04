@@ -91,48 +91,6 @@ The current suite represents a significant evolution, transforming the original 
 
 ---
 
-## Research Applications
-
-### Policy Analysis
-- **Renewable Integration**: Assess grid stability with high renewable penetration
-- **Storage Economics**: Optimize battery deployment and operation
-- **Market Design**: Evaluate new market mechanisms and pricing structures
-
-### Planning Studies
-- **Capacity Expansion**: Long-term investment planning under uncertainty
-- **Transmission Planning**: Grid reinforcement needs with changing generation mix
-- **Resilience Assessment**: System response to extreme events
-
-### Academic Research
-- **Control Theory**: Modern applications to power system dynamics
-- **Market Economics**: Multi-market optimization and game theory
-- **Machine Learning**: AI applications in power system operations
-
----
-
-## Performance Improvements
-
-Compared to the original Liu-Ni-Wu model, the enhanced suite demonstrates:
-
-- **4.0% average price reduction** through storage and demand response optimization
-- **2.3% volatility reduction** via enhanced system flexibility
-- **3.3% peak price improvement** through better resource coordination
-- **100% scenario success rate** in uncertainty analysis
-- **Real-time stability prediction** with >95% accuracy
-
----
-
-## Future Enhancements
-
-### Planned Extensions
-- **Transmission Network**: Power flow constraints and congestion modeling
-- **Market Power**: Strategic bidding and oligopoly behavior
-- **Carbon Markets**: CO2 pricing and environmental constraints
-- **Distributed Resources**: Microgrids and peer-to-peer trading
-- **Deep Learning**: Advanced neural network models for system prediction
-
----
-
 ## Citation
 
 If you use this simulation suite in your research, please cite both the original foundation and the enhanced implementation:
