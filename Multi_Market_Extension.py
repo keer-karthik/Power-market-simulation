@@ -205,6 +205,26 @@ class MultiMarketOptimizer:
             constraints.append(-storage_energy[i] + storage_reg_down[i] <= stor.max_power)
             constraints.append(storage_energy[i] >= -stor.max_power)
             constraints.append(storage_energy[i] <= stor.max_power)
+            
+            # Energy/SOC constraints (prevent overcharge/overdischarge)
+            # Assume single time period dispatch - in reality would need multi-period optimization
+            current_energy = stor.soc * stor.capacity  # Current energy stored
+            
+            # Charging constraint: cannot exceed 100% SOC
+            max_charge_energy = stor.capacity - current_energy  # Energy to full capacity
+            if max_charge_energy > 0:
+                max_charge_power = max_charge_energy / 1.0  # Assume 1-hour time step
+                constraints.append(-storage_energy[i] <= max_charge_power / stor.efficiency)
+            else:
+                constraints.append(storage_energy[i] >= 0)  # No charging if full
+            
+            # Discharging constraint: cannot go below 0% SOC
+            max_discharge_energy = current_energy  # Energy available for discharge
+            if max_discharge_energy > 0:
+                max_discharge_power = max_discharge_energy * stor.efficiency  # Account for efficiency
+                constraints.append(storage_energy[i] <= max_discharge_power)
+            else:
+                constraints.append(storage_energy[i] <= 0)  # No discharging if empty
         
         # Solve optimization problem
         problem = cp.Problem(cp.Minimize(cost), constraints)

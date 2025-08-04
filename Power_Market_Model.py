@@ -105,9 +105,10 @@ class RenewableGenerator:
         self.output = profile[0]
 
 class BatteryStorage:
-    """Battery Energy Storage System"""
+    """Battery Energy Storage System with C-rates, safety margins, and frequency regulation"""
     def __init__(self, storage_id: int, capacity_mwh: float, power_mw: float, 
-                 efficiency: float = 0.9):
+                 efficiency: float = 0.9, c_rate_charge: float = 1.0, c_rate_discharge: float = 1.0,
+                 safety_margins: bool = True, freq_regulation: bool = True):
         self.id = storage_id
         self.capacity = capacity_mwh    # Energy capacity [MWh]
         self.max_power = power_mw       # Power rating [MW]
@@ -116,10 +117,98 @@ class BatteryStorage:
         self.power_output = 0.0        # Current power output [MW] (positive = discharge)
         self.cost_charge = 0.01        # Opportunity cost for charging [$/MWh]
         
+        # C-rate parameters
+        self.c_rate_charge = c_rate_charge      # Charging C-rate (1C = 1 hour to full)
+        self.c_rate_discharge = c_rate_discharge # Discharging C-rate
+        
+        # Calculate C-rate limited power
+        self.max_charge_power_c_rate = capacity_mwh * c_rate_charge    # MW from C-rate
+        self.max_discharge_power_c_rate = capacity_mwh * c_rate_discharge  # MW from C-rate
+        
+        # Safety margins for battery health
+        self.safety_margins = safety_margins
+        self.min_soc_safe = 0.1 if safety_margins else 0.0    # 10% minimum for health
+        self.max_soc_safe = 0.9 if safety_margins else 1.0    # 90% maximum for health
+        
+        # Frequency regulation capability
+        self.freq_regulation = freq_regulation
+        self.freq_response_power = min(power_mw * 0.1, 10)    # 10% of power or 10MW max
+        self.target_frequency = 60.0    # Hz
+        self.freq_deadband = 0.05       # ±0.05 Hz deadband
+        
+        # Statistics for monitoring
+        self.limit_events = {
+            'overcharge_prevented': 0, 
+            'overdischarge_prevented': 0,
+            'c_rate_limited': 0,
+            'safety_margin_limited': 0,
+            'freq_regulation_events': 0
+        }
+        self.max_soc_reached = 0.5
+        self.min_soc_reached = 0.5
+        
     @property
     def energy_stored(self) -> float:
         """Current energy stored [MWh]"""
         return self.soc * self.capacity
+    
+    @property
+    def soc_percentage(self) -> float:
+        """State of charge as percentage (0-100%)"""
+        return self.soc * 100.0
+    
+    @property
+    def is_full(self) -> bool:
+        """Check if battery is at maximum capacity"""
+        return self.soc >= 1.0
+    
+    @property
+    def is_empty(self) -> bool:
+        """Check if battery is at minimum capacity"""
+        return self.soc <= 0.0
+    
+    def get_available_charge_capacity(self) -> float:
+        """Get remaining charge capacity in MWh"""
+        return (1.0 - self.soc) * self.capacity
+    
+    def get_available_discharge_capacity(self) -> float:
+        """Get available discharge capacity in MWh"""
+        return self.soc * self.capacity
+    
+    def get_effective_charge_power_limit(self) -> float:
+        """Get effective charging power limit considering C-rate and power rating"""
+        return min(self.max_power, self.max_charge_power_c_rate)
+    
+    def get_effective_discharge_power_limit(self) -> float:
+        """Get effective discharging power limit considering C-rate and power rating"""
+        return min(self.max_power, self.max_discharge_power_c_rate)
+    
+    def get_safe_soc_range(self) -> tuple:
+        """Get safe SOC operating range"""
+        return (self.min_soc_safe, self.max_soc_safe)
+    
+    def in_safe_operating_range(self) -> bool:
+        """Check if SOC is within safe operating range"""
+        return self.min_soc_safe <= self.soc <= self.max_soc_safe
+    
+    def get_operation_statistics(self) -> dict:
+        """Get comprehensive battery operation statistics"""
+        return {
+            'current_soc_pct': self.soc_percentage,
+            'current_energy_mwh': self.energy_stored,
+            'max_soc_reached_pct': self.max_soc_reached * 100,
+            'min_soc_reached_pct': self.min_soc_reached * 100,
+            'safe_soc_range': f"{self.min_soc_safe*100:.0f}%-{self.max_soc_safe*100:.0f}%",
+            'in_safe_range': self.in_safe_operating_range(),
+            'c_rate_charge': self.c_rate_charge,
+            'c_rate_discharge': self.c_rate_discharge,
+            'max_charge_power_c_rate': self.max_charge_power_c_rate,
+            'max_discharge_power_c_rate': self.max_discharge_power_c_rate,
+            'freq_regulation_enabled': self.freq_regulation,
+            'freq_response_power': self.freq_response_power,
+            'limit_events': self.limit_events.copy(),
+            'energy_limits_working': True
+        }
     
     def can_charge(self, power: float, dt: float) -> bool:
         """Check if battery can charge at given power for time dt"""
@@ -129,27 +218,127 @@ class BatteryStorage:
     def can_discharge(self, power: float, dt: float) -> bool:
         """Check if battery can discharge at given power for time dt"""
         energy_to_remove = power * dt / self.efficiency
-        return (self.soc - energy_to_remove / self.capacity) >= 0.0
+        return (self.soc - energy_to_remove / self.capacity) >= self.min_soc_safe
     
-    def update_storage(self, price: float, dt: float) -> None:
-        """Update battery operation based on market price"""
-        # Simple arbitrage strategy: charge when price is low, discharge when high
-        # This could be enhanced with optimization
+    def frequency_regulation_response(self, grid_frequency: float, dt: float) -> float:
+        """Provide frequency regulation response based on grid frequency"""
+        if not self.freq_regulation:
+            return 0.0
         
-        if price < 30 and self.soc < 0.9:  # Charge when price is low
-            charge_power = min(self.max_power, 
-                             (0.9 - self.soc) * self.capacity / (dt * self.efficiency))
-            if self.can_charge(charge_power, dt):
+        freq_deviation = grid_frequency - self.target_frequency
+        
+        # Only respond if outside deadband
+        if abs(freq_deviation) <= self.freq_deadband:
+            return 0.0
+        
+        # Calculate proportional response
+        response_power = 0.0
+        
+        if freq_deviation < -self.freq_deadband:  # Frequency too low, need to discharge
+            if self.soc > self.min_soc_safe:
+                max_discharge = min(self.freq_response_power, self.get_effective_discharge_power_limit())
+                # Scale response by frequency deviation (more deviation = more response)
+                response_power = max_discharge * min(abs(freq_deviation) / 0.5, 1.0)
+                
+                # Check if we can actually discharge this amount
+                if self.can_discharge(response_power, dt):
+                    self.limit_events['freq_regulation_events'] += 1
+                    return response_power  # Positive = discharge
+                    
+        elif freq_deviation > self.freq_deadband:  # Frequency too high, need to charge
+            if self.soc < self.max_soc_safe:
+                max_charge = min(self.freq_response_power, self.get_effective_charge_power_limit())
+                # Scale response by frequency deviation
+                response_power = max_charge * min(abs(freq_deviation) / 0.5, 1.0)
+                
+                # Check if we can actually charge this amount
+                if self.can_charge(response_power, dt):
+                    self.limit_events['freq_regulation_events'] += 1
+                    return -response_power  # Negative = charge
+        
+        return 0.0
+    
+    def update_storage(self, price: float, dt: float, grid_frequency: float = 60.0) -> None:
+        """Update battery operation with C-rates, safety margins, and frequency regulation"""
+        
+        # 1. First handle frequency regulation (highest priority)
+        freq_response = self.frequency_regulation_response(grid_frequency, dt)
+        if abs(freq_response) > 0:
+            self.power_output = freq_response
+            if freq_response > 0:  # Discharging for frequency support
+                energy_removed = freq_response * dt / self.efficiency
+                new_soc = self.soc - energy_removed / self.capacity
+                self.soc = max(new_soc, self.min_soc_safe)
+            else:  # Charging for frequency support
+                energy_added = abs(freq_response) * dt * self.efficiency
+                new_soc = self.soc + energy_added / self.capacity
+                self.soc = min(new_soc, self.max_soc_safe)
+            return  # Skip market arbitrage when doing frequency regulation
+        
+        # 2. Market arbitrage with C-rate and safety margin constraints
+        # Enforce SOC limits with safety margins
+        self.soc = np.clip(self.soc, 0.0, 1.0)
+        
+        if price < 30 and self.soc < self.max_soc_safe:  # Charge when price low & within safe range
+            # Calculate power limits from multiple constraints
+            energy_to_safe_max = (self.max_soc_safe - self.soc) * self.capacity
+            power_from_energy = energy_to_safe_max / (dt * self.efficiency)
+            
+            # Apply C-rate limit
+            effective_max_charge = self.get_effective_charge_power_limit()
+            
+            charge_power = min(effective_max_charge, power_from_energy)
+            
+            # Track if C-rate was the limiting factor
+            if effective_max_charge < power_from_energy:
+                self.limit_events['c_rate_limited'] += 1
+            
+            if charge_power > 0 and self.can_charge(charge_power, dt):
                 self.power_output = -charge_power  # Negative = charging
-                self.soc += charge_power * dt * self.efficiency / self.capacity
-        elif price > 40 and self.soc > 0.1:  # Discharge when price is high
-            discharge_power = min(self.max_power,
-                                (self.soc - 0.1) * self.capacity * self.efficiency / dt)
-            if self.can_discharge(discharge_power, dt):
+                energy_added = charge_power * dt * self.efficiency
+                new_soc = self.soc + energy_added / self.capacity
+                self.soc = min(new_soc, self.max_soc_safe)
+                
+        elif price > 40 and self.soc > self.min_soc_safe:  # Discharge when price high & above safe min
+            # Calculate power limits from multiple constraints
+            energy_to_safe_min = (self.soc - self.min_soc_safe) * self.capacity
+            power_from_energy = energy_to_safe_min * self.efficiency / dt
+            
+            # Apply C-rate limit
+            effective_max_discharge = self.get_effective_discharge_power_limit()
+            
+            discharge_power = min(effective_max_discharge, power_from_energy)
+            
+            # Track if C-rate was the limiting factor
+            if effective_max_discharge < power_from_energy:
+                self.limit_events['c_rate_limited'] += 1
+            
+            if discharge_power > 0 and self.can_discharge(discharge_power, dt):
                 self.power_output = discharge_power  # Positive = discharging
-                self.soc -= discharge_power * dt / (self.efficiency * self.capacity)
+                energy_removed = discharge_power * dt / self.efficiency
+                new_soc = self.soc - energy_removed / self.capacity
+                self.soc = max(new_soc, self.min_soc_safe)
+                
         else:
             self.power_output = 0.0
+        
+        # Track safety margin limitations
+        if (self.soc >= self.max_soc_safe and price < 30) or (self.soc <= self.min_soc_safe and price > 40):
+            self.limit_events['safety_margin_limited'] += 1
+        
+        # Final safety checks
+        old_soc = self.soc
+        self.soc = np.clip(self.soc, 0.0, 1.0)
+        
+        # Track limit events
+        if old_soc > 1.0:
+            self.limit_events['overcharge_prevented'] += 1
+        if old_soc < 0.0:
+            self.limit_events['overdischarge_prevented'] += 1
+            
+        # Update SOC extremes
+        self.max_soc_reached = max(self.max_soc_reached, self.soc)
+        self.min_soc_reached = min(self.min_soc_reached, self.soc)
 
 class DemandResponse:
     """Flexible demand that responds to price signals"""
@@ -274,10 +463,13 @@ class EnhancedPowerMarket:
         return ren_id
     
     def add_battery_storage(self, capacity_mwh: float, power_mw: float, 
-                          efficiency: float = 0.9) -> int:
-        """Add battery storage system"""
+                          efficiency: float = 0.9, c_rate_charge: float = 1.0, 
+                          c_rate_discharge: float = 1.0, safety_margins: bool = True,
+                          freq_regulation: bool = True) -> int:
+        """Add enhanced battery storage system with C-rates and safety features"""
         storage_id = len(self.storage)
-        battery = BatteryStorage(storage_id, capacity_mwh, power_mw, efficiency)
+        battery = BatteryStorage(storage_id, capacity_mwh, power_mw, efficiency,
+                               c_rate_charge, c_rate_discharge, safety_margins, freq_regulation)
         self.storage.append(battery)
         self.storage_history[f'battery_{storage_id}'] = {
             'power': np.zeros(self.params.total_steps + 1),
@@ -364,7 +556,12 @@ class EnhancedPowerMarket:
             
             # Update storage systems
             for storage in self.storage:
-                storage.update_storage(price, self.params.dt)
+                # Generate realistic grid frequency variation
+                base_frequency = 60.0
+                freq_noise = np.random.normal(0, 0.02)  # ±0.02 Hz random variation
+                grid_frequency = base_frequency + freq_noise
+                
+                storage.update_storage(price, self.params.dt, grid_frequency)
                 self.storage_history[f'battery_{storage.id}']['power'][t] = storage.power_output
                 self.storage_history[f'battery_{storage.id}']['soc'][t] = storage.soc
         
@@ -508,9 +705,16 @@ def create_test_system() -> EnhancedPowerMarket:
     market.add_renewable(capacity=300, renewable_type='hydro')  # Hydropower plant
     market.add_renewable(capacity=800, renewable_type='nuclear')  # Nuclear baseload
     
-    # Add battery storage
-    market.add_battery_storage(capacity_mwh=100, power_mw=50, efficiency=0.9)
-    market.add_battery_storage(capacity_mwh=200, power_mw=100, efficiency=0.85)
+    # Add battery storage with different C-rates and features
+    # Fast-charging battery (2C rate = 30 min to full charge)
+    market.add_battery_storage(capacity_mwh=100, power_mw=50, efficiency=0.9, 
+                             c_rate_charge=2.0, c_rate_discharge=1.5, 
+                             safety_margins=True, freq_regulation=True)
+    
+    # Slower, larger battery (0.5C rate = 2 hours to full charge) - more typical for grid storage
+    market.add_battery_storage(capacity_mwh=200, power_mw=100, efficiency=0.85,
+                             c_rate_charge=0.5, c_rate_discharge=0.75,
+                             safety_margins=True, freq_regulation=True)
     
     # Add demand response
     market.set_demand_response(baseline_demand=1200, max_reduction=200, elasticity=-0.15)
