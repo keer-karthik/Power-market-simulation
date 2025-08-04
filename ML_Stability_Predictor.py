@@ -323,7 +323,7 @@ class StabilityPredictor:
     def _generate_synthetic_system_state(self, n_gen: int, total_capacity: float, 
                                        renewable_share: float) -> Dict:
         """Generate synthetic system state"""
-        from Enhanced_Power_Market_Model import Generator
+        from Power_Market_Model import Generator
         
         generators = []
         conventional_capacity = total_capacity * (1 - renewable_share)

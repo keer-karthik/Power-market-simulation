@@ -261,7 +261,7 @@ class MonteCarloAnalyzer:
     def _create_model_copy(self):
         """Create a copy of the base model"""
         # Simplified copy - in practice, you'd need a proper deep copy
-        from Enhanced_Power_Market_Model import EnhancedPowerMarket, MarketParameters
+        from Power_Market_Model import EnhancedPowerMarket, MarketParameters
         
         model_copy = EnhancedPowerMarket(self.base_model.params)
         

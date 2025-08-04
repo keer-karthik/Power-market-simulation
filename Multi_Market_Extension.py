@@ -210,7 +210,8 @@ class MultiMarketOptimizer:
         problem = cp.Problem(cp.Minimize(cost), constraints)
         
         try:
-            problem.solve(solver=cp.ECOS)
+            # Use OSQP solver which is reliable for this problem type
+            problem.solve(solver=cp.OSQP, verbose=False, max_iter=1000)
             
             if problem.status == cp.OPTIMAL:
                 # Extract dual prices (marginal costs)
