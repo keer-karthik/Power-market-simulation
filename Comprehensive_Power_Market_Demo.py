@@ -33,7 +33,7 @@ import os
 
 print("Checking for required files...")
 required_files = [
-    'Enhanced_Power_Market_Model.py',
+    'Power_Market_Model.py',
     'Multi_Market_Extension.py',
     'Uncertainty_Analysis.py',
     'ML_Stability_Predictor.py'
@@ -53,7 +53,7 @@ if missing_files:
 else:
     print("All files found. Attempting imports...")
     try:
-        from Enhanced_Power_Market_Model import (
+        from Power_Market_Model import (
             EnhancedPowerMarket, MarketParameters, create_test_system
         )
         from Multi_Market_Extension import (
@@ -317,7 +317,7 @@ def create_test_market_data(scenario):
 
 def create_test_system_state():
     """Create test system state for ML prediction"""
-    from Enhanced_Power_Market_Model import Generator
+    from Power_Market_Model import Generator
     
     generators = [
         Generator(0, 2.0, 0.02, 3.0, 500),
