@@ -27,13 +27,21 @@ class MarketParameters:
 class Generator:
     """Base generator class"""
     def __init__(self, gen_id: int, linear_cost: float, quadratic_cost: float, 
-                 adjustment_param: float, max_capacity: float = 1000.0):
+                 adjustment_param: float, max_capacity: float  = 1000.0,
+                 inertia_H: float = 5.0, damping_D: float = 1.0, 
+                 generator_type: str = 'thermal'):
         self.id = gen_id
         self.b = linear_cost          # Linear cost coefficient [$/MWh]
         self.c = quadratic_cost       # Quadratic cost coefficient [$/MW²h]
         self.A = adjustment_param     # Dynamic adjustment parameter
         self.max_capacity = max_capacity
         self.output = 0.0            # Current output [MW]
+        
+        # Physical parameters for stability analysis
+        self.inertia_H = inertia_H    # Inertia constant [s]
+        self.damping_D = damping_D    # Damping coefficient
+        self.generator_type = generator_type
+        self.M = 2 * inertia_H * max_capacity / (100.0 * (2 * np.pi * 60)**2)  # Inertia coefficient
         
     def marginal_cost(self, output: float = None) -> float:
         """Calculate marginal cost at given output"""
@@ -136,6 +144,15 @@ class BatteryStorage:
         self.target_frequency = 60.0    # Hz
         self.freq_deadband = 0.05       # ±0.05 Hz deadband
         
+        # NEW: Price history tracking
+        self.price_history = []
+        self.max_history_length = 168  # 1 week of hourly data
+        
+        # NEW: Action tracking for minimum runtime constraints
+        self.last_action = 'idle'  # 'charge', 'discharge', 'idle'
+        self.action_duration = 0   # How long in current action (hours)
+        self.min_action_time = 0.25  # Minimum 15 minutes in same action
+        
         # Statistics for monitoring
         self.limit_events = {
             'overcharge_prevented': 0, 
@@ -220,6 +237,43 @@ class BatteryStorage:
         energy_to_remove = power * dt / self.efficiency
         return (self.soc - energy_to_remove / self.capacity) >= self.min_soc_safe
     
+    def add_price_to_history(self, price: float):
+        """Track price history for dynamic thresholds"""
+        self.price_history.append(price)
+        if len(self.price_history) > self.max_history_length:
+            self.price_history.pop(0)
+    
+    def calculate_price_percentiles(self):
+        """Calculate dynamic price thresholds based on recent history"""
+        if len(self.price_history) < 24:  # Need at least 24 hours
+            return 25.0, 45.0  # Default thresholds
+        
+        import numpy as np
+        prices = np.array(self.price_history)
+        p25 = np.percentile(prices, 25)
+        p75 = np.percentile(prices, 75)
+        return p25, p75
+    
+    
+    def get_realistic_power_limits(self, desired_power: float, dt: float) -> float:
+        """Calculate realistic power limits considering all constraints"""
+        
+        # C-rate limits
+        if desired_power > 0:  # Discharging
+            c_rate_limit = self.get_effective_discharge_power_limit()
+            soc_limit = (self.soc - self.min_soc_safe) * self.capacity / dt * self.efficiency
+        else:  # Charging  
+            c_rate_limit = self.get_effective_charge_power_limit()
+            soc_limit = (self.max_soc_safe - self.soc) * self.capacity / dt / self.efficiency
+        
+        # Hardware power limit
+        hardware_limit = self.max_power
+        
+        # Take the minimum of all limits
+        max_possible = min(c_rate_limit, abs(soc_limit), hardware_limit)
+        
+        return min(abs(desired_power), max_possible) * (1 if desired_power >= 0 else -1)
+
     def frequency_regulation_response(self, grid_frequency: float, dt: float) -> float:
         """Provide frequency regulation response based on grid frequency"""
         if not self.freq_regulation:
@@ -259,9 +313,12 @@ class BatteryStorage:
         return 0.0
     
     def update_storage(self, price: float, dt: float, grid_frequency: float = 60.0) -> None:
-        """Update battery operation with C-rates, safety margins, and frequency regulation"""
+        """FIXED: Robust battery operation with proper price-responsive logic and minimum action constraints"""
         
-        # 1. First handle frequency regulation (highest priority)
+        # Add price to history for analysis
+        self.add_price_to_history(price)
+        
+        # 1. Handle frequency regulation first (highest priority)
         freq_response = self.frequency_regulation_response(grid_frequency, dt)
         if abs(freq_response) > 0:
             self.power_output = freq_response
@@ -273,69 +330,128 @@ class BatteryStorage:
                 energy_added = abs(freq_response) * dt * self.efficiency
                 new_soc = self.soc + energy_added / self.capacity
                 self.soc = min(new_soc, self.max_soc_safe)
+            self.action_duration += dt
             return  # Skip market arbitrage when doing frequency regulation
         
-        # 2. Market arbitrage with C-rate and safety margin constraints
-        # Enforce SOC limits with safety margins
-        self.soc = np.clip(self.soc, 0.0, 1.0)
-        
-        if price < 30 and self.soc < self.max_soc_safe:  # Charge when price low & within safe range
-            # Calculate power limits from multiple constraints
-            energy_to_safe_max = (self.max_soc_safe - self.soc) * self.capacity
-            power_from_energy = energy_to_safe_max / (dt * self.efficiency)
+        # 2. FIXED: Dynamic price thresholds with conservative margins
+        if len(self.price_history) >= 24:
+            recent_prices = np.array(self.price_history[-24:])
+            p25 = np.percentile(recent_prices, 25)  # Bottom 25% for charging
+            p75 = np.percentile(recent_prices, 75)  # Top 25% for discharging
             
-            # Apply C-rate limit
-            effective_max_charge = self.get_effective_charge_power_limit()
-            
-            charge_power = min(effective_max_charge, power_from_energy)
-            
-            # Track if C-rate was the limiting factor
-            if effective_max_charge < power_from_energy:
-                self.limit_events['c_rate_limited'] += 1
-            
-            if charge_power > 0 and self.can_charge(charge_power, dt):
-                self.power_output = -charge_power  # Negative = charging
-                energy_added = charge_power * dt * self.efficiency
-                new_soc = self.soc + energy_added / self.capacity
-                self.soc = min(new_soc, self.max_soc_safe)
-                
-        elif price > 40 and self.soc > self.min_soc_safe:  # Discharge when price high & above safe min
-            # Calculate power limits from multiple constraints
-            energy_to_safe_min = (self.soc - self.min_soc_safe) * self.capacity
-            power_from_energy = energy_to_safe_min * self.efficiency / dt
-            
-            # Apply C-rate limit
-            effective_max_discharge = self.get_effective_discharge_power_limit()
-            
-            discharge_power = min(effective_max_discharge, power_from_energy)
-            
-            # Track if C-rate was the limiting factor
-            if effective_max_discharge < power_from_energy:
-                self.limit_events['c_rate_limited'] += 1
-            
-            if discharge_power > 0 and self.can_discharge(discharge_power, dt):
-                self.power_output = discharge_power  # Positive = discharging
-                energy_removed = discharge_power * dt / self.efficiency
-                new_soc = self.soc - energy_removed / self.capacity
-                self.soc = max(new_soc, self.min_soc_safe)
-                
+            # Add margins to prevent continuous cycling while allowing reasonable opportunities
+            charge_threshold = p25 * 0.95   # Charge when price < 95% of 25th percentile
+            discharge_threshold = p75 * 1.10  # Discharge when price > 110% of 75th percentile
         else:
-            self.power_output = 0.0
+            # Conservative default thresholds until we have history
+            charge_threshold = 25.0
+            discharge_threshold = 45.0
         
-        # Track safety margin limitations
-        if (self.soc >= self.max_soc_safe and price < 30) or (self.soc <= self.min_soc_safe and price > 40):
-            self.limit_events['safety_margin_limited'] += 1
+        # 3. Check minimum action time constraint to prevent erratic cycling
+        if self.action_duration < self.min_action_time:
+            # Continue current action for minimum time
+            if self.last_action == 'charge' and self.soc < self.max_soc_safe:
+                # Continue charging at reduced rate
+                continue_power = min(5.0, self.get_effective_charge_power_limit())
+                self.power_output = -continue_power
+                energy_added = continue_power * dt * self.efficiency
+                self.soc = min(self.soc + energy_added / self.capacity, self.max_soc_safe)
+            elif self.last_action == 'discharge' and self.soc > self.min_soc_safe:
+                # Continue discharging at reduced rate
+                continue_power = min(10.0, self.get_effective_discharge_power_limit())
+                self.power_output = continue_power
+                energy_removed = continue_power * dt / self.efficiency
+                self.soc = max(self.soc - energy_removed / self.capacity, self.min_soc_safe)
+            else:
+                self.power_output = 0.0
+                self.last_action = 'idle'
+            
+            self.action_duration += dt
+            return
+        
+        # 4. CHARGING LOGIC (more restrictive)
+        if price < charge_threshold and self.soc < self.max_soc_safe:
+            # Calculate reasonable charge power with all constraints
+            available_capacity = (self.max_soc_safe - self.soc) * self.capacity
+            max_charge_power = min(
+                self.get_effective_charge_power_limit(),
+                available_capacity / (dt * self.efficiency),
+                self.max_power * 0.5  # Limit to 50% of max power for smoother operation
+            )
+            
+            # Scale by price incentive (more aggressive when prices are very low)
+            price_factor = min(1.0, (charge_threshold - price) / charge_threshold)
+            target_power = max_charge_power * max(0.3, price_factor)  # At least 30% power
+            
+            if target_power > 1.0:  # Minimum 1 MW threshold
+                self.power_output = -target_power  # Negative = charging
+                energy_added = target_power * dt * self.efficiency
+                self.soc = min(self.soc + energy_added / self.capacity, self.max_soc_safe)
+                
+                # Update action tracking
+                if self.last_action != 'charge':
+                    self.action_duration = 0
+                self.last_action = 'charge'
+        
+        # 5. DISCHARGING LOGIC (more restrictive)  
+        elif price > discharge_threshold and self.soc > self.min_soc_safe:
+            # Calculate reasonable discharge power with all constraints
+            available_energy = (self.soc - self.min_soc_safe) * self.capacity
+            max_discharge_power = min(
+                self.get_effective_discharge_power_limit(),
+                available_energy * self.efficiency / dt,
+                self.max_power * 0.6  # Limit to 60% of max power
+            )
+            
+            # Scale by price incentive (more aggressive when prices are very high)
+            price_factor = min(1.0, (price - discharge_threshold) / discharge_threshold)
+            target_power = max_discharge_power * max(0.2, price_factor)  # At least 20% power
+            
+            if target_power > 1.0:  # Minimum 1 MW threshold
+                self.power_output = target_power  # Positive = discharging
+                energy_removed = target_power * dt / self.efficiency
+                self.soc = max(self.soc - energy_removed / self.capacity, self.min_soc_safe)
+                
+                # Update action tracking
+                if self.last_action != 'discharge':
+                    self.action_duration = 0
+                self.last_action = 'discharge'
+        
+        # 6. IDLE STATE with gentle SOC rebalancing
+        else:
+            # Gradual rebalancing toward 60% SOC during neutral price periods
+            target_soc = 0.6
+            soc_error = target_soc - self.soc
+            
+            # Only rebalance if price is in neutral range and error is significant
+            if abs(soc_error) > 0.15 and charge_threshold < price < discharge_threshold:
+                rebalance_power = min(5.0, abs(soc_error) * self.capacity / 8)  # Gentle rebalancing
+                
+                if soc_error > 0:  # Need to charge to reach target
+                    self.power_output = -rebalance_power
+                    energy_added = rebalance_power * dt * self.efficiency
+                    self.soc = min(self.soc + energy_added / self.capacity, self.max_soc_safe)
+                else:  # Need to discharge to reach target
+                    self.power_output = rebalance_power
+                    energy_removed = rebalance_power * dt / self.efficiency
+                    self.soc = max(self.soc - energy_removed / self.capacity, self.min_soc_safe)
+                
+                # Update action tracking for idle rebalancing
+                if self.last_action != 'idle':
+                    self.action_duration = 0
+                self.last_action = 'idle'
+            else:
+                self.power_output = 0.0
+                if self.last_action != 'idle':
+                    self.action_duration = 0
+                self.last_action = 'idle'
+        
+        # Update action duration
+        self.action_duration += dt
         
         # Final safety checks
-        old_soc = self.soc
         self.soc = np.clip(self.soc, 0.0, 1.0)
         
-        # Track limit events
-        if old_soc > 1.0:
-            self.limit_events['overcharge_prevented'] += 1
-        if old_soc < 0.0:
-            self.limit_events['overdischarge_prevented'] += 1
-            
         # Update SOC extremes
         self.max_soc_reached = max(self.max_soc_reached, self.soc)
         self.min_soc_reached = min(self.min_soc_reached, self.soc)
@@ -386,43 +502,116 @@ class PowerNetwork:
 class StabilityAnalyzer:
     """Power system stability analysis"""
     def __init__(self):
-        pass
+        self.omega_s = 2 * np.pi * 60  # Synchronous frequency [rad/s]
+        
+    def swing_equation_stability(self, generators: List[Generator], 
+                               S_base: float = 100.0) -> Tuple[bool, np.ndarray, Dict]:
+        """
+        Analyze small-signal stability using proper swing equation linearization
+        Based on multi-machine swing equation: M_i * d²δ_i/dt² + D_i * dδ_i/dt = P_mi - P_ei
+        """
+        n = len(generators)
+        if n == 0:
+            return True, np.array([]), {}
+        
+        # Only include generators with physical inertia (synchronous machines)
+        sync_gens = [gen for gen in generators if gen.inertia_H > 0]
+        n_sync = len(sync_gens)
+        
+        if n_sync == 0:
+            print("WARNING: No synchronous generators with inertia found!")
+            return False, np.array([]), {'warning': 'No inertia in system'}
+        
+        # Build system matrix A for linearized swing equations
+        # State vector: [δ₁, δ₂, ..., δₙ, ω₁, ω₂, ..., ωₙ]
+        # Where δᵢ = power angle, ωᵢ = angular frequency deviation
+        A = np.zeros((2*n_sync, 2*n_sync))
+        
+        total_inertia = sum(gen.inertia_H * gen.max_capacity for gen in sync_gens)
+        avg_inertia = total_inertia / sum(gen.max_capacity for gen in sync_gens)
+        
+        # Coupling strength (simplified - could be network-based)
+        K_coupling = 1.0  # Synchronizing power coefficient
+        
+        for i, gen_i in enumerate(sync_gens):
+            # δ equations: dδᵢ/dt = ωᵢ
+            A[i, n_sync + i] = 1.0
+            
+            # ω equations: dωᵢ/dt = (P_mi - P_ei - D_i*ω_i)/M_i
+            M_i = gen_i.M  # Inertia coefficient
+            D_i = gen_i.damping_D
+            
+            # Self-regulation term: -D_i/M_i
+            A[n_sync + i, n_sync + i] = -D_i / M_i
+            
+            # Synchronizing power terms: -K/M_i
+            A[n_sync + i, i] = -K_coupling / M_i
+            
+            # Cross-coupling with other generators
+            for j, gen_j in enumerate(sync_gens):
+                if i != j:
+                    # Coupling between generators
+                    coupling_ij = K_coupling * 0.1  # Reduced coupling between machines
+                    A[n_sync + i, j] = coupling_ij / M_i
+        
+        eigenvals, eigenvecs = eig(A)
+        stable = np.all(eigenvals.real < 0)
+        stability_metrics = {
+            'total_system_inertia': total_inertia,
+            'average_inertia': avg_inertia,
+            'synchronous_generators': n_sync,
+            'total_generators': n,
+            'inertia_ratio': n_sync / n if n > 0 else 0,
+            'min_damping_ratio': min(gen.damping_D for gen in sync_gens),
+            'system_matrix_condition': np.linalg.cond(A),
+            'dominant_eigenvalue': eigenvals[np.argmax(eigenvals.real)],
+            'eigenvalue_real_parts': eigenvals.real,
+            'stability_margin': -np.max(eigenvals.real) if len(eigenvals) > 0 else 0
+        }
+
+        return stable, eigenvals, stability_metrics
     
     def small_signal_stability(self, generators: List[Generator], 
                              market_params: MarketParameters) -> Tuple[bool, np.ndarray]:
-        """Analyze small-signal stability using linearized model"""
-        n = len(generators)
-        # System matrix for perfect competition dynamics
-        A_matrix = np.zeros((n, n))
-        
-        for i, gen in enumerate(generators):
-            # Diagonal elements: -Ai * ci (self-regulation)
-            A_matrix[i, i] = -gen.A * gen.c
-            # Off-diagonal elements: -Ai * f (market coupling)
-            for j in range(n):
-                if i != j:
-                    A_matrix[i, j] = -gen.A * market_params.demand_slope
-        
-        eigenvals, _ = eig(A_matrix)
-        stable = np.all(eigenvals.real < 0)
-        
-        return stable, eigenvals
+        """Legacy method - now calls proper swing equation analysis"""
+        stable, eigenvals, _ = self.swing_equation_stability(generators)
     
     def convergence_analysis(self, generators: List[Generator]) -> Dict:
         """Analyze convergence properties"""
+        sync_gens = [gen for gen in generators if gen.inertia_H > 0]
+        
+        if not sync_gens:
+            return {'warning': 'No synchronous generators for analysis'}
         time_constants = []
         eigenvalues = []
-        
-        for gen in generators:
-            T = 1 / (gen.A * gen.c)  # Time constant
-            eigenval = -1 / T        # Approximate eigenvalue
+        settling_times = []
+
+        for gen in sync_gens:
+            # Physical time constant: T = 2H/(D*ω_s)
+            if gen.damping_D > 0:
+                T = 2 * gen.inertia_H / (gen.damping_D * self.omega_s)
+                settling_time = 4 * T  # 4 time constants for 98% settling
+            else:
+                T = float('inf')  # Undamped
+                settling_time = float('inf')
+            
+            # Approximate eigenvalue for single machine
+            if gen.damping_D > 0:
+                eigenval = -gen.damping_D / (2 * gen.inertia_H)
+            else:
+                eigenval = 0.0
+
             time_constants.append(T)
             eigenvalues.append(eigenval)
         
         return {
             'time_constants': np.array(time_constants),
             'eigenvalues': np.array(eigenvalues),
-            'settling_time': max(time_constants) * 4  # 4 time constants for 98% settling
+            'settling_times': np.array(settling_times),
+            'max_settling_time': max(settling_times) if settling_times else 0,
+            'min_time_constant': min(time_constants) if time_constants else 0,
+            'system_inertia': sum(gen.inertia_H * gen.max_capacity for gen in sync_gens),
+            'system_damping': sum(gen.damping_D * gen.max_capacity for gen in sync_gens)
         }
 
 class EnhancedPowerMarket:
@@ -446,10 +635,16 @@ class EnhancedPowerMarket:
         self.storage_history = {}
         
     def add_generator(self, linear_cost: float, quadratic_cost: float, 
-                     adjustment_param: float, max_capacity: float = 1000.0) -> int:
-        """Add conventional generator"""
+                     adjustment_param: float, max_capacity: float = 1000.0,
+                     inertia_H: float = 5.0, damping_D: float = 1.0,
+                     generator_type: str = 'thermal') -> int:
+        """Add conventional generator with reasonable initial output"""
         gen_id = len(self.generators)
-        gen = Generator(gen_id, linear_cost, quadratic_cost, adjustment_param, max_capacity)
+        gen = Generator(gen_id, linear_cost, quadratic_cost, adjustment_param, max_capacity, inertia_H, damping_D, generator_type)
+        
+        # FIXED: Initialize with reasonable starting output (30-50% of capacity) to prevent initial price spikes
+        gen.output = max_capacity * np.random.uniform(0.3, 0.5)
+        
         self.generators.append(gen)
         self.generation_history[f'gen_{gen_id}'] = np.zeros(self.params.total_steps + 1)
         return gen_id
@@ -580,11 +775,11 @@ class EnhancedPowerMarket:
         
         # Stability analysis
         if self.generators:
-            stable, eigenvals = self.stability_analyzer.small_signal_stability(
-                self.generators, self.params)
+            stable, eigenvals, stability_metrics = self.stability_analyzer.swing_equation_stability(
+                self.generators)
             convergence_info = self.stability_analyzer.convergence_analysis(self.generators)
         else:
-            stable, eigenvals = True, np.array([])
+            stable, eigenvals, stability_metrics = True, np.array([]), {}
             convergence_info = {}
         
         return {
@@ -596,6 +791,7 @@ class EnhancedPowerMarket:
             'stability': {
                 'stable': stable,
                 'eigenvalues': eigenvals,
+                'metrics': stability_metrics,
                 'convergence': convergence_info
             },
             'parameters': self.params
@@ -666,14 +862,21 @@ class EnhancedPowerMarket:
         ax6 = plt.subplot(3, 2, 6)
         if 'eigenvalues' in results['stability'] and len(results['stability']['eigenvalues']) > 0:
             eigenvals = results['stability']['eigenvalues']
-            plt.scatter(eigenvals.real, eigenvals.imag, s=50, alpha=0.7)
-            plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+            plt.scatter(eigenvals.real, eigenvals.imag, s=50, alpha=0.7, c='blue')
+            plt.axvline(x=0, color='r', linestyle='--', alpha=0.5, label='Stability Boundary')
             plt.xlabel('Real Part')
             plt.ylabel('Imaginary Part')
+
+            # Add stability information
+            stable = results['stability']['stable']
+            metrics = results['stability'].get('metrics', {})
+            title_text = f"System Eigenvalues (Stable: {stable})"
+            if 'total_system_inertia' in metrics:
+                title_text += f"\nInertia: {metrics['total_system_inertia']:.1f} MW·s"
             plt.title(f"System Eigenvalues (Stable: {results['stability']['stable']})")
             plt.grid(True, alpha=0.3)
         else:
-            plt.text(0.5, 0.5, 'No conventional\ngenerators for\nstability analysis', 
+            plt.text(0.5, 0.5, 'No synchronous\ngenerators with\ninertia for proper\nstability analysis',  
                     ha='center', va='center', transform=ax6.transAxes)
             plt.title('Stability Analysis')
         
@@ -693,12 +896,14 @@ def create_test_system() -> EnhancedPowerMarket:
     
     market = EnhancedPowerMarket(params)
     
-    # Add conventional generators (from original model)
-    market.add_generator(linear_cost=2.0, quadratic_cost=0.02, adjustment_param=3.0, max_capacity=500)
-    market.add_generator(linear_cost=1.75, quadratic_cost=0.0175, adjustment_param=4.0, max_capacity=600)
-    market.add_generator(linear_cost=3.0, quadratic_cost=0.025, adjustment_param=2.5, max_capacity=400)
-    market.add_generator(linear_cost=3.0, quadratic_cost=0.025, adjustment_param=3.0, max_capacity=450)
+    # Add conventional generators
+    # Thermal generators: H = 2-10 seconds, D = 1-2 per unit
+    market.add_generator(linear_cost=2.0, quadratic_cost=0.02, adjustment_param=3.0, max_capacity=500, inertia_H=6.0, damping_D=1.5, generator_type='thermal')
+    market.add_generator(linear_cost=1.75, quadratic_cost=0.0175, adjustment_param=4.0, max_capacity=600,  inertia_H=7.5, damping_D=1.2, generator_type='thermal')
+    market.add_generator(linear_cost=3.0, quadratic_cost=0.025, adjustment_param=2.5, max_capacity=400, inertia_H=5.0, damping_D=1.8, generator_type='thermal')
+    market.add_generator(linear_cost=3.0, quadratic_cost=0.025, adjustment_param=3.0, max_capacity=450, inertia_H=4.5, damping_D=1.6, generator_type='thermal')
     
+
     # Add renewable generation
     market.add_renewable(capacity=200, renewable_type='solar')
     market.add_renewable(capacity=150, renewable_type='wind')
@@ -732,12 +937,26 @@ if __name__ == "__main__":
     print(f"Average price: ${np.mean(results['price']):.2f}/MWh")
     print(f"Price volatility (std): ${np.std(results['price']):.2f}/MWh")
     
-    if results['stability']['stable']:
-        print("\nSystem stability: STABLE")
-        if 'convergence' in results['stability'] and 'settling_time' in results['stability']['convergence']:
-            print(f"Estimated settling time: {results['stability']['convergence']['settling_time']:.2f} hours")
+    stability = results['stability']
+    metrics = stability.get('metrics', {})
+    convergence = stability.get('convergence', {})
+    
+    print(f"\n=== Enhanced Stability Analysis ===")
+    if stability['stable']:
+        print("System stability: STABLE")
     else:
-        print("\nSystem stability: UNSTABLE")
+        print("System stability: UNSTABLE")
+    
+    if 'total_system_inertia' in metrics:
+        print(f"Total system inertia: {metrics['total_system_inertia']:.2f} MW·s")
+        print(f"Average generator inertia: {metrics['average_inertia']:.2f} s")
+        print(f"Synchronous generators: {metrics['synchronous_generators']}")
+        print(f"Inertia ratio: {metrics['inertia_ratio']:.2%}")
+        print(f"Stability margin: {metrics['stability_margin']:.4f}")
+    
+    if 'max_settling_time' in convergence:
+        print(f"Maximum settling time: {convergence['max_settling_time']:.2f} hours")
+        print(f"System inertia (convergence): {convergence['system_inertia']:.2f} MW·s")
     
     # Plot results
     market.plot_results(results)

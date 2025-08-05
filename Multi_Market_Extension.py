@@ -44,7 +44,8 @@ class EnhancedGenerator:
     """Generator with capability to provide multiple services"""
     def __init__(self, gen_id: int, linear_cost: float, quadratic_cost: float, 
                  adjustment_param: float, max_capacity: float = 1000.0,
-                 ramp_rate: float = 50.0):
+                 ramp_rate: float = 50.0, inertia_H: float = 5.0, 
+                 damping_D: float = 1.0, generator_type: str = 'thermal'):
         self.id = gen_id
         self.b = linear_cost          # Linear cost coefficient [$/MWh]
         self.c = quadratic_cost       # Quadratic cost coefficient [$/MW²h]
@@ -52,6 +53,12 @@ class EnhancedGenerator:
         self.max_capacity = max_capacity
         self.ramp_rate = ramp_rate    # MW/min ramping capability
         self.output = 0.0            # Current output [MW]
+        
+        # Physical parameters for stability analysis
+        self.inertia_H = inertia_H    # Inertia constant [s]
+        self.damping_D = damping_D    # Damping coefficient
+        self.generator_type = generator_type
+        self.M = 2 * inertia_H * max_capacity / (100.0 * (2 * np.pi * 60)**2)  # Inertia coefficient
         
         # Reserve capabilities and costs
         self.spinning_reserve_cost = linear_cost * 0.1      # 10% of energy cost
@@ -343,11 +350,13 @@ class MultiMarketSimulation:
         
     def add_enhanced_generator(self, linear_cost: float, quadratic_cost: float, 
                              adjustment_param: float, max_capacity: float = 1000.0,
-                             ramp_rate: float = 50.0) -> int:
+                             ramp_rate: float = 50.0, inertia_H: float = 5.0,
+                             damping_D: float = 1.0, generator_type: str = 'thermal') -> int:
         """Add generator with ancillary service capability"""
         gen_id = len(self.generators)
         gen = EnhancedGenerator(gen_id, linear_cost, quadratic_cost, 
-                              adjustment_param, max_capacity, ramp_rate)
+                              adjustment_param, max_capacity, ramp_rate,
+                              inertia_H, damping_D, generator_type)
         self.generators.append(gen)
         
         # Initialize history tracking
@@ -509,7 +518,7 @@ class MultiMarketSimulation:
 
 # Example usage
 if __name__ == "__main__":
-    from Enhanced_Power_Market_Model import MarketParameters
+    from Power_Market_Model import MarketParameters
     
     # Test the multi-market system
     params = MarketParameters(simulation_hours=24, time_step_minutes=5)

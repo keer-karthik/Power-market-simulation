@@ -334,7 +334,10 @@ class StabilityPredictor:
             adjustment_param = np.random.uniform(1.0, 5.0)
             capacity = conventional_capacity / n_gen
             
-            gen = Generator(i, linear_cost, quadratic_cost, adjustment_param, capacity)
+            gen = Generator(i, linear_cost, quadratic_cost, adjustment_param, capacity,
+                          inertia_H=np.random.uniform(4.0, 8.0), 
+                          damping_D=np.random.uniform(0.8, 2.0),
+                          generator_type='thermal')
             generators.append(gen)
         
         return {'generators': generators}
@@ -655,11 +658,11 @@ if __name__ == "__main__":
         'time': np.array([10, 11, 12, 13, 14])
     }
     
-    from Enhanced_Power_Market_Model import Generator
+    from Power_Market_Model import Generator
     test_system_state = {
         'generators': [
-            Generator(0, 2.0, 0.02, 3.0, 300),
-            Generator(1, 1.8, 0.018, 3.5, 250)
+            Generator(0, 2.0, 0.02, 3.0, 300, 5.0, 1.2, 'thermal'),
+            Generator(1, 1.8, 0.018, 3.5, 250, 6.0, 1.0, 'thermal')
         ]
     }
     

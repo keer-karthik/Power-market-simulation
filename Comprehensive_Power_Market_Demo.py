@@ -343,8 +343,8 @@ def create_test_system_state():
     from Power_Market_Model import Generator
     
     generators = [
-        Generator(0, 2.0, 0.02, 3.0, 500),
-        Generator(1, 1.8, 0.018, 3.5, 400)
+        Generator(0, 2.0, 0.02, 3.0, 500, 5.0, 1.2, 'thermal'),
+        Generator(1, 1.8, 0.018, 3.5, 400, 6.0, 1.0, 'thermal')
     ]
     
     return {'generators': generators}

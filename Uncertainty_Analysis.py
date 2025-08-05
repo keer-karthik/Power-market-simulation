@@ -269,7 +269,8 @@ class MonteCarloAnalyzer:
         
         # Copy generators
         for gen in self.base_model.generators:
-            model_copy.add_generator(gen.b, gen.c, gen.A, gen.max_capacity)
+            model_copy.add_generator(gen.b, gen.c, gen.A, gen.max_capacity, 
+                                   gen.inertia_H, gen.damping_D, gen.generator_type)
         
         # Copy renewables
         for ren in self.base_model.renewables:
@@ -497,7 +498,7 @@ class MonteCarloAnalyzer:
 
 # Example usage and testing
 if __name__ == "__main__":
-    from Enhanced_Power_Market_Model import EnhancedPowerMarket, MarketParameters
+    from Power_Market_Model import EnhancedPowerMarket, MarketParameters
     
     # Create a test market
     params = MarketParameters(simulation_hours=4, time_step_minutes=15)  # Shorter for testing
