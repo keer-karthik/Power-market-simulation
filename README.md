@@ -110,30 +110,3 @@ Liu, Y., Ni, Y., Wu, F. (2004). Control Theory Application in Power Market Stabi
 Enhanced Power Market Simulation Suite (2024). Evolution of Liu-Ni-Wu Control Theory Framework 
 for Modern Power System Analysis. https://github.com/[repository]
 ```
-
----
-
-## Contributing
-
-This project welcomes contributions in the following areas:
-- Additional renewable energy models (geothermal, biomass, tidal, etc.)
-- Enhanced hydropower modeling (reservoir optimization, cascade systems)
-- Advanced nuclear operations (load following, small modular reactors)
-- New market mechanisms (capacity markets, carbon pricing)
-- Advanced optimization algorithms
-- Machine learning improvements
-- Documentation and examples
-
-## License
-
-[Specify your license here]
-
----
-
-## Contact
-
-For questions, issues, or collaboration opportunities, please [contact information].
-
----
-
-*This simulation suite represents the evolution of power market modeling from classical control theory to modern AI-driven analysis, maintaining the mathematical rigor of the original while embracing the complexity of today's energy systems.*
